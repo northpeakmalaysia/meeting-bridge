@@ -1,28 +1,5 @@
-# Dependencies
 node_modules/
-
-# Build output
-dist/
-
-# Logs
 *.log
-mcp-server.log
-
-# Environment / secrets
 .env
 .env.*
-!.env.example
-
-# Editor / OS
 .DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
-
-# Test / coverage
-coverage/
-.nyc_output/
-
-# Backup folder (per user convention)
-Backup/

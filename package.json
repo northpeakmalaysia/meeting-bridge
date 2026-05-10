@@ -27,8 +27,12 @@
     "@swarmai/shared": ">=0.5.0"
   },
   "peerDependenciesMeta": {
-    "@swarmai/plugin-sdk": { "optional": false },
-    "@swarmai/shared": { "optional": false }
+    "@swarmai/plugin-sdk": {
+      "optional": false
+    },
+    "@swarmai/shared": {
+      "optional": false
+    }
   },
   "dependencies": {
     "ws": "^8.20.0",
