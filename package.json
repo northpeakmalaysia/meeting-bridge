@@ -46,7 +46,7 @@
     "type": "git",
     "url": "https://github.com/northpeakmalaysia/meeting-bridge"
   },
-  "homepage": "https://hub.northpeak.app",
+  "homepage": "https://northpeak.app",
   "engines": {
     "node": ">=22.0.0"
   }
