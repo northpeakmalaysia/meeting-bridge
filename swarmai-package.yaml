@@ -1,0 +1,10 @@
+# Runtime metadata read by the SwarmAI plugin loader.
+# Cross-validated against the `@swarmai/meeting-bridge` manifest.yaml that
+# lives under packages/official/meeting-bridge/ in the SwarmAI Hub repo.
+id: '@swarmai/meeting-bridge'
+version: '0.1.0'
+kind: 'tool'
+entry: './dist/index.js'
+capabilities:
+  - 'network:fetch'
+  - 'fs:read'
