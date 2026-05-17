@@ -17,7 +17,7 @@
  * integration can ship + version independently. Operators install (or
  * upgrade) from the SwarmAI Hub pane without rebuilding the CEO Agent.
  */
-import { z } from '@swarmai/shared';
+import { z } from 'zod';
 import { ConfigSchema } from './config-schema.js';
 import { HubBridgeClient, } from './bridge-client.js';
 const PLUGIN_ID = '@swarmai/meeting-bridge';

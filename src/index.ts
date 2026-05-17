@@ -18,7 +18,7 @@
  * upgrade) from the SwarmAI Hub pane without rebuilding the CEO Agent.
  */
 
-import { z } from '@swarmai/shared';
+import { z } from 'zod';
 import type { PluginAPI, PluginEntry, ToolDef } from '@swarmai/plugin-sdk';
 import { ConfigSchema, type ConfigSchemaT } from './config-schema.js';
 import {

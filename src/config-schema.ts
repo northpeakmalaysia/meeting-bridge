@@ -1,8 +1,10 @@
 /**
  * Operator-supplied config (mirrors `configSchema` in manifest.yaml).
- * Validated with @swarmai/shared's zod re-export at runtime.
+ * Uses zod directly rather than the @swarmai/shared re-export so the
+ * compiled bundle has no bare @swarmai/* runtime imports that the host
+ * would need to resolve.
  */
-import { z } from '@swarmai/shared';
+import { z } from 'zod';
 
 export const ConfigSchema = z.object({
   url: z.string().url().refine((u) => u.startsWith('ws://') || u.startsWith('wss://'), {
