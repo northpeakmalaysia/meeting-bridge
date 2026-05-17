@@ -24,6 +24,36 @@ export interface WelcomePayload {
     tenantSlug: string;
     tenantDisplayName: string;
 }
+export interface FetchArtefactResult {
+    body: Buffer;
+    mime: string;
+    filename: string;
+}
+export interface HistoryQueryInput {
+    meetingId?: string;
+    attendeePeerId?: string;
+    guestEmail?: string;
+    query?: string;
+    status?: 'live' | 'adjourned' | 'all';
+    startedAfter?: number;
+    startedBefore?: number;
+    limit?: number;
+    cursor?: string;
+    includeTranscript?: boolean;
+    includeAttendees?: boolean;
+    includeArtefacts?: boolean;
+}
+export interface MintInviteInput {
+    meetingId: string;
+    expiresAt: number;
+    maxUses?: number;
+    createdBy?: string;
+}
+export interface MintInviteResult {
+    inviteToken: string;
+    url: string;
+    expiresAt: number;
+}
 export declare class HubBridgeClient extends EventEmitter {
     private readonly config;
     private readonly hostInfo;
@@ -34,6 +64,7 @@ export declare class HubBridgeClient extends EventEmitter {
     private reconnectAttempts;
     private welcome;
     private pending;
+    private pendingStream;
     /** Last server event id we acknowledged seeing; sent on resume. */
     private lastServerEventId;
     private installationId;
@@ -67,6 +98,27 @@ export declare class HubBridgeClient extends EventEmitter {
         type: string;
     }): void;
     stop(): Promise<void>;
+    /** True iff the WSS is open AND we've received the `bridge.welcome`. */
+    get isConnected(): boolean;
+    /** Subscribe to the `bridge.welcome` event. Fires once per (re)connection. */
+    onWelcome(cb: (welcome: WelcomePayload) => void): () => void;
+    /** Mint a share-link invite. Single round-trip. */
+    mintInvite(input: MintInviteInput): Promise<MintInviteResult>;
+    /** Query the Hub-side meeting archive. Single round-trip. */
+    queryHistory(input: HistoryQueryInput): Promise<{
+        total: number;
+        meetings: Array<Record<string, unknown>>;
+        nextCursor?: string;
+    }>;
+    /**
+     * Fetch an artefact's bytes from the Hub. The Hub answers with a
+     * chunked sequence of `bridge.artefact.fetch-reply` frames
+     * (`phase: 'begin' | 'chunk' | 'end' | 'error'`); we accumulate the
+     * base64 chunks and resolve with the assembled buffer + metadata.
+     * Hard 60s ceiling per fetch — large transfers should be paginated
+     * at the application layer rather than relying on a longer ceiling.
+     */
+    fetchArtefact(meetingId: string, artefactId: string): Promise<FetchArtefactResult>;
     private connect;
 }
 //# sourceMappingURL=bridge-client.d.ts.map

@@ -19,7 +19,7 @@
  */
 import { z } from '@swarmai/shared';
 import { ConfigSchema } from './config-schema.js';
-import { HubBridgeClient } from './bridge-client.js';
+import { HubBridgeClient, } from './bridge-client.js';
 const PLUGIN_ID = '@swarmai/meeting-bridge';
 const PLUGIN_VERSION = '0.1.0';
 /**
@@ -84,6 +84,24 @@ const pluginEntry = (api, rawConfig) => {
     void bridge.ensureConnected().catch((err) => {
         logger.error('initial bridge connect failed', { error: err.message });
     });
+    // -------------------------------------------------------------------
+    // Service registration — host-side consumers (e.g. the artefact-
+    // download branch in `apps/server/src/api/meetings.ts`) read this
+    // via `pluginRegistry.getService('meeting-bridge')`. The service
+    // contract lives in `@swarmai/plugin-sdk/services/hub-bridge` and
+    // is shape-equivalent to the imperative API our `createHubBridge`
+    // factory exposes, plus the presentation + invokePlugin methods
+    // that the agent tools below also use directly.
+    // -------------------------------------------------------------------
+    const service = buildHubBridgeService(bridge);
+    const apiWithService = api;
+    if (typeof apiWithService.registerService === 'function') {
+        apiWithService.registerService('meeting-bridge', service);
+        logger.info('meeting-bridge service registered on host');
+    }
+    else {
+        logger.warn('host PluginAPI does not expose registerService — meeting-bridge service unavailable to host consumers (older swarmai-server build?)');
+    }
     // -------------------------------------------------------------------
     // Tool registrations
     // -------------------------------------------------------------------
@@ -296,4 +314,112 @@ function buildPresentCloseTool(bridge) {
     };
 }
 void PLUGIN_ID;
+// =====================================================================
+// Service contract impl — wraps HubBridgeClient with the methods the
+// host's ServiceRegistry consumers expect. Some methods reuse the
+// public helpers on HubBridgeClient (mintInvite/queryHistory/
+// fetchArtefact/onWelcome); the rest issue inline `bridge.request(...)`
+// calls because the tool builders below already follow that shape and
+// duplicating the inline pattern keeps the wire surface single-sourced
+// in this file.
+// =====================================================================
+function buildHubBridgeService(bridge) {
+    return {
+        start: async () => {
+            await bridge.ensureConnected();
+        },
+        stop: () => bridge.stop(),
+        get connected() {
+            return bridge.isConnected;
+        },
+        onWelcome(listener) {
+            return bridge.onWelcome((w) => {
+                listener({
+                    tenantId: w.tenantId,
+                    tenantSlug: w.tenantSlug,
+                    tenantDisplayName: w.tenantDisplayName,
+                });
+            });
+        },
+        fetchArtefact: (meetingId, artefactId) => bridge.fetchArtefact(meetingId, artefactId),
+        mintInvite: (input) => bridge.mintInvite({
+            meetingId: input.meetingId,
+            expiresAt: input.expiresAt,
+            createdBy: input.createdBy,
+            ...(input.maxUses !== undefined ? { maxUses: input.maxUses } : {}),
+        }),
+        queryHistory: async (input) => {
+            // HubBridgeClient.queryHistory returns the wire shape with
+            // `meetings: Array<Record<string, unknown>>`; the canonical
+            // contract types it more precisely. Cast through `unknown`
+            // because both sides agree on the Hub's reply shape but TS
+            // can't infer that from the wire-level placeholder.
+            const r = await bridge.queryHistory(input);
+            return r;
+        },
+        readArtefactExtraction: async (input) => {
+            // Reuses the history.query path with includeExtractions so the Hub
+            // returns the artefact's full extracted text in one round trip.
+            const r = await bridge.queryHistory({
+                meetingId: input.meetingId,
+                includeAttendees: false,
+                includeTranscript: false,
+                includeArtefacts: true,
+                includeExtractions: true,
+                limit: 1,
+            });
+            const meeting = r.meetings[0];
+            const artefacts = meeting?.['artefacts'] ?? [];
+            const artefact = artefacts.find((a) => a.artefactId === input.artefactId);
+            const extraction = artefact?.extractions?.find((e) => input.pluginId === undefined || e.pluginId === input.pluginId);
+            if (!artefact || !extraction) {
+                throw new Error(`artefact ${input.artefactId} (plugin ${input.pluginId ?? 'any'}) not found in meeting ${input.meetingId}`);
+            }
+            return {
+                ok: true,
+                pluginId: extraction.pluginId,
+                pluginVersion: extraction.pluginVersion,
+                extractedText: extraction.extractedText ?? '',
+                ...(extraction.pageCount !== undefined ? { pageCount: extraction.pageCount } : {}),
+                ...(extraction.warnings !== undefined ? { warnings: extraction.warnings } : {}),
+            };
+        },
+        invokePlugin: async (input) => {
+            const reply = await bridge.request({
+                type: 'bridge.plugin.invoke',
+                pluginId: input.pluginId,
+                meetingId: input.meetingId,
+                payload: input.payload,
+                ...(input.artefactId !== undefined ? { artefactId: input.artefactId } : {}),
+            }, 'bridge.plugin.invoke-result');
+            return reply;
+        },
+        openPresentation: async (input) => {
+            return bridge.request({
+                type: 'bridge.presentation.open',
+                meetingId: input.meetingId,
+                artefactId: input.artefactId,
+                controllerPeerId: input.controllerPeerId,
+            }, 'bridge.presentation.opened');
+        },
+        navigatePresentation: async (input) => {
+            return bridge.request({
+                type: 'bridge.presentation.navigate',
+                meetingId: input.meetingId,
+                presentationId: input.presentationId,
+                toPage: input.toPage,
+                byPeerId: input.byPeerId,
+            }, 'bridge.presentation.state-changed');
+        },
+        closePresentation: async (input) => {
+            await bridge.request({
+                type: 'bridge.presentation.close',
+                meetingId: input.meetingId,
+                presentationId: input.presentationId,
+                byPeerId: input.byPeerId,
+            }, 'bridge.presentation.state-changed');
+            return { ok: true };
+        },
+    };
+}
 //# sourceMappingURL=index.js.map

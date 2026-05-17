@@ -22,4 +22,6 @@ import { ConfigSchema } from './config-schema.js';
 declare const pluginEntry: PluginEntry;
 export default pluginEntry;
 export { pluginEntry, ConfigSchema };
+export type { FetchArtefactResult, HistoryQueryInput, MintInviteInput, MintInviteResult, WelcomePayload, } from './bridge-client.js';
+export type { HubBridge, HubBridgeWelcome } from './types/hub-bridge-contract.js';
 //# sourceMappingURL=index.d.ts.map

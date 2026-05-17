@@ -27,6 +27,19 @@ interface PendingReply {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * Multi-frame reply correlation. Used by `fetchArtefact` where the Hub
+ * answers a `bridge.artefact.fetch` with a `begin → chunk* → end` series
+ * (or a single `error` frame). The handler returns `'done'` to release
+ * the slot or `'continue'` to keep accumulating. The bridge framework
+ * never times out a stream from the client side — handlers manage their
+ * own deadline.
+ */
+interface PendingStream {
+  onFrame: (frame: Record<string, unknown>) => 'continue' | 'done';
+  onError: (err: Error) => void;
+}
+
 export interface WelcomePayload {
   hubVersion: string;
   serverEventId: string;
@@ -36,6 +49,40 @@ export interface WelcomePayload {
   tenantDisplayName: string;
 }
 
+export interface FetchArtefactResult {
+  body: Buffer;
+  mime: string;
+  filename: string;
+}
+
+export interface HistoryQueryInput {
+  meetingId?: string;
+  attendeePeerId?: string;
+  guestEmail?: string;
+  query?: string;
+  status?: 'live' | 'adjourned' | 'all';
+  startedAfter?: number;
+  startedBefore?: number;
+  limit?: number;
+  cursor?: string;
+  includeTranscript?: boolean;
+  includeAttendees?: boolean;
+  includeArtefacts?: boolean;
+}
+
+export interface MintInviteInput {
+  meetingId: string;
+  expiresAt: number;
+  maxUses?: number;
+  createdBy?: string;
+}
+
+export interface MintInviteResult {
+  inviteToken: string;
+  url: string;
+  expiresAt: number;
+}
+
 export class HubBridgeClient extends EventEmitter {
   private ws: WebSocket | null = null;
   private connecting = false;
@@ -43,6 +90,7 @@ export class HubBridgeClient extends EventEmitter {
   private reconnectAttempts = 0;
   private welcome: WelcomePayload | null = null;
   private pending = new Map<string, PendingReply>();
+  private pendingStream = new Map<string, PendingStream>();
   /** Last server event id we acknowledged seeing; sent on resume. */
   private lastServerEventId: string | null = null;
   private installationId: string;
@@ -146,6 +194,131 @@ export class HubBridgeClient extends EventEmitter {
       p.reject(new Error('bridge shutting down'));
     }
     this.pending.clear();
+    for (const s of this.pendingStream.values()) {
+      s.onError(new Error('bridge shutting down'));
+    }
+    this.pendingStream.clear();
+  }
+
+  // ------------------------------------------------------------------
+  // Public imperative API — consumed by `createHubBridge(...)` so the
+  // CEO Agent host can wire a `hubBridge` accessor into MeetingsApiDeps
+  // without going through the plugin-loader path. Each method assumes
+  // the bridge will be reachable; ephemeral disconnects surface as
+  // promise rejections rather than hard errors.
+  // ------------------------------------------------------------------
+
+  /** True iff the WSS is open AND we've received the `bridge.welcome`. */
+  get isConnected(): boolean {
+    return this.welcome !== null && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
+  /** Subscribe to the `bridge.welcome` event. Fires once per (re)connection. */
+  onWelcome(cb: (welcome: WelcomePayload) => void): () => void {
+    const wrap = (w: WelcomePayload): void => cb(w);
+    this.on('welcome', wrap);
+    if (this.welcome) cb(this.welcome);
+    return () => this.off('welcome', wrap);
+  }
+
+  /** Mint a share-link invite. Single round-trip. */
+  async mintInvite(input: MintInviteInput): Promise<MintInviteResult> {
+    const frame: Record<string, unknown> & { type: string } = {
+      type: 'bridge.invite.mint',
+      meetingId: input.meetingId,
+      expiresAt: input.expiresAt,
+      createdBy: input.createdBy ?? 'main',
+    };
+    if (input.maxUses !== undefined) frame['maxUses'] = input.maxUses;
+    return this.request<MintInviteResult>(frame, 'bridge.invite.minted');
+  }
+
+  /** Query the Hub-side meeting archive. Single round-trip. */
+  async queryHistory(input: HistoryQueryInput): Promise<{
+    total: number;
+    meetings: Array<Record<string, unknown>>;
+    nextCursor?: string;
+  }> {
+    return this.request(
+      { type: 'bridge.meeting.history.query', ...input },
+      'bridge.meeting.history.result',
+    );
+  }
+
+  /**
+   * Fetch an artefact's bytes from the Hub. The Hub answers with a
+   * chunked sequence of `bridge.artefact.fetch-reply` frames
+   * (`phase: 'begin' | 'chunk' | 'end' | 'error'`); we accumulate the
+   * base64 chunks and resolve with the assembled buffer + metadata.
+   * Hard 60s ceiling per fetch — large transfers should be paginated
+   * at the application layer rather than relying on a longer ceiling.
+   */
+  async fetchArtefact(meetingId: string, artefactId: string): Promise<FetchArtefactResult> {
+    await this.ensureConnected();
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('bridge not connected');
+    }
+    const id = randomUUID();
+    return new Promise<FetchArtefactResult>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let mime = 'application/octet-stream';
+      let filename: string | undefined;
+      const timer = setTimeout(() => {
+        this.pendingStream.delete(id);
+        reject(new Error(`bridge timeout waiting for artefact ${artefactId}`));
+      }, 60_000);
+      this.pendingStream.set(id, {
+        onFrame: (frame): 'continue' | 'done' => {
+          const phase = frame['phase'] as string | undefined;
+          if (phase === 'begin') {
+            mime = (frame['mime'] as string) ?? mime;
+            filename = (frame['label'] as string | undefined) ?? `artefact-${artefactId}`;
+            return 'continue';
+          }
+          if (phase === 'chunk') {
+            const dataB64 = frame['dataB64'] as string | undefined;
+            if (dataB64) chunks.push(Buffer.from(dataB64, 'base64'));
+            return 'continue';
+          }
+          if (phase === 'end') {
+            clearTimeout(timer);
+            resolve({
+              body: Buffer.concat(chunks),
+              mime,
+              filename: filename ?? `artefact-${artefactId}`,
+            });
+            return 'done';
+          }
+          if (phase === 'error') {
+            clearTimeout(timer);
+            reject(new Error((frame['errorMessage'] as string) ?? 'fetch failed'));
+            return 'done';
+          }
+          // Unknown phase — keep listening but log it.
+          this.logger.warn('unknown fetch-reply phase', { phase, artefactId });
+          return 'continue';
+        },
+        onError: (err): void => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
+      const wire = {
+        type: 'bridge.artefact.fetch',
+        v: 1,
+        id,
+        at: Date.now(),
+        meetingId,
+        artefactId,
+      };
+      try {
+        this.ws!.send(JSON.stringify(wire));
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingStream.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 
   // ---------------------------------------------------------------
@@ -233,6 +406,27 @@ export class HubBridgeClient extends EventEmitter {
         // Match request/reply.
         const refersToId = frame['refersToId'] as string | undefined;
         if (refersToId) {
+          // Streaming replies take precedence — fetchArtefact and any
+          // future multi-frame correlator register here. The handler
+          // controls when to release the slot via 'done', so chunks
+          // accumulate without each frame consuming the registration.
+          const stream = this.pendingStream.get(refersToId);
+          if (stream) {
+            if (type === 'bridge.error') {
+              this.pendingStream.delete(refersToId);
+              stream.onError(
+                new Error(
+                  `bridge error: ${(frame['code'] as string) ?? 'unknown'} — ${
+                    (frame['detail'] as string) ?? ''
+                  }`,
+                ),
+              );
+              return;
+            }
+            const verdict = stream.onFrame(frame);
+            if (verdict === 'done') this.pendingStream.delete(refersToId);
+            return;
+          }
           const pending = this.pending.get(refersToId);
           if (pending) {
             this.pending.delete(refersToId);
