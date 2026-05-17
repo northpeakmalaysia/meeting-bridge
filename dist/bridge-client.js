@@ -32,13 +32,38 @@ export class HubBridgeClient extends EventEmitter {
     lastServerEventId = null;
     installationId;
     agentDisplayName;
-    constructor(config, hostInfo, logger) {
+    /** Cached after first resolution; cleared on hard auth failure so a
+     *  follow-on connect re-runs the source (e.g. re-enroll after token
+     *  rotation). */
+    resolvedToken = null;
+    tokenSource;
+    constructor(config, hostInfo, logger, 
+    /**
+     * Lazy token source. When omitted, falls back to `config.token`.
+     * The plugin's pluginEntry wires this with an enrollment-aware
+     * resolver so the bridge can self-enroll on first connect.
+     * Called once per connect; cached between connects.
+     */
+    tokenSource) {
         super();
         this.config = config;
         this.hostInfo = hostInfo;
         this.logger = logger;
         this.installationId = hostInfo.installationId;
         this.agentDisplayName = hostInfo.agentDisplayName;
+        this.tokenSource =
+            tokenSource ??
+                (async () => {
+                    if (!config.token) {
+                        throw new Error('no bridge token: provide config.token, config.bootstrapSecret, ' +
+                            'or env SWARMAI_HUB_BOOTSTRAP_SECRET');
+                    }
+                    return config.token;
+                });
+    }
+    /** Force the next connect to re-resolve the token. Used after a 4401 close. */
+    invalidateToken() {
+        this.resolvedToken = null;
     }
     /**
      * Open the connection if not already open. Resolves once we've received
@@ -231,10 +256,14 @@ export class HubBridgeClient extends EventEmitter {
         });
     }
     // ---------------------------------------------------------------
-    connect() {
+    async connect() {
+        if (!this.resolvedToken) {
+            this.resolvedToken = await this.tokenSource();
+        }
+        const token = this.resolvedToken;
         return new Promise((resolveConnect, rejectConnect) => {
             const ws = new WebSocket(this.config.url, {
-                headers: { authorization: `Bearer ${this.config.token}` },
+                headers: { authorization: `Bearer ${token}` },
             });
             this.ws = ws;
             let helloed = false;

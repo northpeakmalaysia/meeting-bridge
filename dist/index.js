@@ -20,8 +20,10 @@
 import { z } from 'zod';
 import { ConfigSchema } from './config-schema.js';
 import { HubBridgeClient, } from './bridge-client.js';
+import { readState, writeState } from './session-store.js';
+import { enrollWithHub, EnrollmentError } from './enroll.js';
 const PLUGIN_ID = '@swarmai/meeting-bridge';
-const PLUGIN_VERSION = '0.1.0';
+const PLUGIN_VERSION = '0.2.0';
 /**
  * Identity loader: the CEO Agent stores `agentInstallationId` in
  * `<workspace>/.swarmai/installation-id`. We can't import the host's
@@ -69,8 +71,67 @@ function makeLogger(api) {
 const pluginEntry = (api, rawConfig) => {
     const config = ConfigSchema.parse(rawConfig ?? {});
     const logger = makeLogger(api);
+    const installationId = loadInstallationId();
+    // Token resolution priority — lazy, runs on first ensureConnected:
+    //   1. State file at <workspace>/.swarmai/meeting-bridge/state.json
+    //   2. config.token (legacy explicit-provisioning path)
+    //   3. POST /bridge/enroll with bootstrap secret (config first, env fallback)
+    //
+    // Each tier short-circuits the next. State is persisted only after a
+    // successful enrollment, so a manually-configured token in plugins.yaml
+    // is never overwritten with an auto-enrolled one.
+    const tokenSource = async () => {
+        const stored = readState();
+        if (stored?.token) {
+            logger.info('using stored bridge token', {
+                tenantId: stored.tenantId,
+                slug: stored.slug,
+                issuedAt: new Date(stored.issuedAt).toISOString(),
+            });
+            return stored.token;
+        }
+        if (config.token) {
+            logger.info('using config-supplied bridge token (explicit-provisioning path)');
+            return config.token;
+        }
+        const bootstrap = config.bootstrapSecret ?? process.env['SWARMAI_HUB_BOOTSTRAP_SECRET'];
+        if (!bootstrap) {
+            throw new Error('bridge has no token: provide config.token, config.bootstrapSecret, ' +
+                'or env SWARMAI_HUB_BOOTSTRAP_SECRET');
+        }
+        logger.info('no stored token — running zero-touch enrollment against Hub', {
+            installationId,
+        });
+        try {
+            const result = await enrollWithHub({
+                hubBaseUrl: config.url,
+                bootstrapSecret: bootstrap,
+                installationId,
+            });
+            const session = {
+                token: result.bridgeToken,
+                tenantId: result.tenantId,
+                slug: result.slug,
+                issuedAt: Date.now(),
+                stateVersion: 1,
+            };
+            writeState(session);
+            logger.info('bridge enrolled with Hub', {
+                tenantId: result.tenantId,
+                slug: result.slug,
+                reEnrolled: result.reEnrolled,
+            });
+            return result.bridgeToken;
+        }
+        catch (err) {
+            if (err instanceof EnrollmentError) {
+                logger.error('enrollment rejected by Hub', { status: err.status, code: err.code });
+            }
+            throw err instanceof Error ? err : new Error(String(err));
+        }
+    };
     const bridge = new HubBridgeClient(config, {
-        installationId: loadInstallationId(),
+        installationId,
         agentDisplayName: 'Athena',
         serverVersion: PLUGIN_VERSION,
         platform: process.platform === 'win32' || process.platform === 'darwin'
@@ -78,7 +139,7 @@ const pluginEntry = (api, rawConfig) => {
             : 'linux',
         nodeVersion: process.versions.node,
         swarmaiVersion: PLUGIN_VERSION,
-    }, logger);
+    }, logger, tokenSource);
     // Open the connection eagerly in the background so the first tool call
     // doesn't pay the bcrypt-auth latency. Failures don't block boot.
     void bridge.ensureConnected().catch((err) => {

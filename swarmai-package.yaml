@@ -2,9 +2,41 @@
 # Cross-validated against the `@swarmai/meeting-bridge` manifest.yaml that
 # lives under packages/official/meeting-bridge/ in the SwarmAI Hub repo.
 id: '@swarmai/meeting-bridge'
-version: '0.1.1'
+version: '0.1.3'
 kind: 'tool'
 entry: './dist/index.js'
 capabilities:
   - 'network:fetch'
   - 'fs:read'
+
+# Surfaced to the dashboard's Hub pane so operators can fill in the
+# Meeting Hub WSS endpoint + bearer token via the Configure button
+# instead of hand-editing plugins.yaml.
+configSchema:
+  title: 'SwarmAI Meeting Hub'
+  description: >-
+    Connect this CEO Agent to a SwarmAI Meeting Hub so external guests
+    can join meetings as human-external attendees in Athena's
+    MeetingRegistry.
+  required: [url, token]
+  properties:
+    url:
+      type: string
+      title: 'Hub WebSocket URL'
+      description: 'The wss:// (or ws://) endpoint of your Meeting Hub.'
+      format: uri
+      examples: ['wss://hub.example.com/bridge']
+    token:
+      type: string
+      title: 'Hub bearer token'
+      description: 'Authentication token issued by the Hub admin (≥20 chars).'
+      format: password
+    expectedTenantSlug:
+      type: string
+      title: 'Expected tenant slug (optional)'
+      description: 'When set, the bridge refuses to connect if the Hub reports a different tenant — guards against pairing with the wrong instance.'
+    artefactSizeLimitMb:
+      type: number
+      title: 'Artefact size limit (MB)'
+      description: 'Max payload size for fetched artefacts.'
+      default: 50

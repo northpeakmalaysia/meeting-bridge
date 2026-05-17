@@ -6,6 +6,11 @@
     "moduleResolution": "bundler",
     "outDir": "./dist",
     "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "@swarmai/plugin-sdk": ["./src/types/swarmai-shims.d.ts"],
+      "@swarmai/shared": ["./src/types/swarmai-shims.d.ts"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

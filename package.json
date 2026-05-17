@@ -1,6 +1,6 @@
 {
   "name": "@swarmai/meeting-bridge",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "SwarmAI plugin: connects the CEO Agent to a SwarmAI Meeting Hub so external guests can join meetings as human-external attendees.",
   "type": "module",
   "main": "./dist/index.js",
@@ -39,6 +39,8 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@swarmai/plugin-sdk": "file:D:/source/NorthPeak/Project/SwarmAI - CEO Agent/packages/plugin-sdk",
+    "@swarmai/shared": "file:D:/source/NorthPeak/Project/SwarmAI - CEO Agent/packages/shared",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.0",
     "typescript": "^5.7.0",

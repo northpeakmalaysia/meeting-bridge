@@ -69,6 +69,11 @@ export declare class HubBridgeClient extends EventEmitter {
     private lastServerEventId;
     private installationId;
     private agentDisplayName;
+    /** Cached after first resolution; cleared on hard auth failure so a
+     *  follow-on connect re-runs the source (e.g. re-enroll after token
+     *  rotation). */
+    private resolvedToken;
+    private readonly tokenSource;
     constructor(config: ConfigSchemaT, hostInfo: {
         installationId: string;
         agentDisplayName: string;
@@ -80,7 +85,16 @@ export declare class HubBridgeClient extends EventEmitter {
         info: (msg: string, fields?: Record<string, unknown>) => void;
         warn: (msg: string, fields?: Record<string, unknown>) => void;
         error: (msg: string, fields?: Record<string, unknown>) => void;
-    });
+    }, 
+    /**
+     * Lazy token source. When omitted, falls back to `config.token`.
+     * The plugin's pluginEntry wires this with an enrollment-aware
+     * resolver so the bridge can self-enroll on first connect.
+     * Called once per connect; cached between connects.
+     */
+    tokenSource?: () => Promise<string>);
+    /** Force the next connect to re-resolve the token. Used after a 4401 close. */
+    invalidateToken(): void;
     /**
      * Open the connection if not already open. Resolves once we've received
      * `bridge.welcome` (or rejects on hard close codes 4401/4402/4451).

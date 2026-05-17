@@ -95,6 +95,11 @@ export class HubBridgeClient extends EventEmitter {
   private lastServerEventId: string | null = null;
   private installationId: string;
   private agentDisplayName: string;
+  /** Cached after first resolution; cleared on hard auth failure so a
+   *  follow-on connect re-runs the source (e.g. re-enroll after token
+   *  rotation). */
+  private resolvedToken: string | null = null;
+  private readonly tokenSource: () => Promise<string>;
 
   constructor(
     private readonly config: ConfigSchemaT,
@@ -111,10 +116,33 @@ export class HubBridgeClient extends EventEmitter {
       warn: (msg: string, fields?: Record<string, unknown>) => void;
       error: (msg: string, fields?: Record<string, unknown>) => void;
     },
+    /**
+     * Lazy token source. When omitted, falls back to `config.token`.
+     * The plugin's pluginEntry wires this with an enrollment-aware
+     * resolver so the bridge can self-enroll on first connect.
+     * Called once per connect; cached between connects.
+     */
+    tokenSource?: () => Promise<string>,
   ) {
     super();
     this.installationId = hostInfo.installationId;
     this.agentDisplayName = hostInfo.agentDisplayName;
+    this.tokenSource =
+      tokenSource ??
+      (async (): Promise<string> => {
+        if (!config.token) {
+          throw new Error(
+            'no bridge token: provide config.token, config.bootstrapSecret, ' +
+              'or env SWARMAI_HUB_BOOTSTRAP_SECRET',
+          );
+        }
+        return config.token;
+      });
+  }
+
+  /** Force the next connect to re-resolve the token. Used after a 4401 close. */
+  invalidateToken(): void {
+    this.resolvedToken = null;
   }
 
   /**
@@ -323,10 +351,14 @@ export class HubBridgeClient extends EventEmitter {
 
   // ---------------------------------------------------------------
 
-  private connect(): Promise<WelcomePayload> {
+  private async connect(): Promise<WelcomePayload> {
+    if (!this.resolvedToken) {
+      this.resolvedToken = await this.tokenSource();
+    }
+    const token = this.resolvedToken;
     return new Promise((resolveConnect, rejectConnect) => {
       const ws = new WebSocket(this.config.url, {
-        headers: { authorization: `Bearer ${this.config.token}` },
+        headers: { authorization: `Bearer ${token}` },
       });
       this.ws = ws;
 
