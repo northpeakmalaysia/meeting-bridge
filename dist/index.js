@@ -23,7 +23,7 @@ import { HubBridgeClient, } from './bridge-client.js';
 import { readState, writeState } from './session-store.js';
 import { enrollWithHub, EnrollmentError } from './enroll.js';
 const PLUGIN_ID = '@swarmai/meeting-bridge';
-const PLUGIN_VERSION = '0.2.0';
+const PLUGIN_VERSION = '0.3.0';
 /**
  * Identity loader: the CEO Agent stores `agentInstallationId` in
  * `<workspace>/.swarmai/installation-id`. We can't import the host's
@@ -193,7 +193,11 @@ function buildShareLinkTool(bridge) {
     return {
         name: 'swarm_admin.meeting.share_link',
         toolset: 'swarm_admin.meeting',
-        description: 'Mint a Hub share link for an existing meeting. Returns { url, inviteToken, expiresAt }.',
+        description: 'Required to share a meeting with external (non-staff) attendees. ' +
+            'Returns a clickable URL AND a 6-digit accessPin + joinPageUrl for ' +
+            'phone/voice handoff. Use accessPin when reading credentials over a ' +
+            'call ("go to <joinPageUrl>, meeting <id>, PIN <pin>"). Same expiry ' +
+            'and maxUses budget apply to both URL and PIN.',
         schema: Input,
         policy: 'master',
         emoji: '🔗',
@@ -205,10 +209,16 @@ function buildShareLinkTool(bridge) {
                 ...(input.maxUses !== undefined ? { maxUses: input.maxUses } : {}),
                 createdBy: input.createdBy,
             }, 'bridge.invite.minted');
+            const accessPinFormatted = reply.accessPin
+                ? `${reply.accessPin.slice(0, 3)}-${reply.accessPin.slice(3)}`
+                : undefined;
             return {
                 url: reply.url,
                 inviteToken: reply.inviteToken,
                 expiresAt: reply.expiresAt,
+                ...(reply.accessPin ? { accessPin: reply.accessPin } : {}),
+                ...(accessPinFormatted ? { accessPinFormatted } : {}),
+                ...(reply.joinPageUrl ? { joinPageUrl: reply.joinPageUrl } : {}),
             };
         },
     };

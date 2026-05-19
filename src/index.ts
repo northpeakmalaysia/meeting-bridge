@@ -65,7 +65,7 @@ type PluginAPIWithService = PluginAPI & {
 };
 
 const PLUGIN_ID = '@swarmai/meeting-bridge';
-const PLUGIN_VERSION = '0.2.0';
+const PLUGIN_VERSION = '0.3.0';
 
 type Logger = {
   info: (msg: string, fields?: Record<string, unknown>) => void;
@@ -277,7 +277,11 @@ function buildShareLinkTool(bridge: HubBridgeClient): ToolDef {
     name: 'swarm_admin.meeting.share_link',
     toolset: 'swarm_admin.meeting',
     description:
-      'Mint a Hub share link for an existing meeting. Returns { url, inviteToken, expiresAt }.',
+      'Required to share a meeting with external (non-staff) attendees. ' +
+      'Returns a clickable URL AND a 6-digit accessPin + joinPageUrl for ' +
+      'phone/voice handoff. Use accessPin when reading credentials over a ' +
+      'call ("go to <joinPageUrl>, meeting <id>, PIN <pin>"). Same expiry ' +
+      'and maxUses budget apply to both URL and PIN.',
     schema: Input,
     policy: 'master',
     emoji: '🔗',
@@ -285,6 +289,8 @@ function buildShareLinkTool(bridge: HubBridgeClient): ToolDef {
       const reply = await bridge.request<{
         inviteToken: string;
         url: string;
+        accessPin?: string;
+        joinPageUrl?: string;
         expiresAt: number;
       }>(
         {
@@ -296,10 +302,16 @@ function buildShareLinkTool(bridge: HubBridgeClient): ToolDef {
         },
         'bridge.invite.minted',
       );
+      const accessPinFormatted = reply.accessPin
+        ? `${reply.accessPin.slice(0, 3)}-${reply.accessPin.slice(3)}`
+        : undefined;
       return {
         url: reply.url,
         inviteToken: reply.inviteToken,
         expiresAt: reply.expiresAt,
+        ...(reply.accessPin ? { accessPin: reply.accessPin } : {}),
+        ...(accessPinFormatted ? { accessPinFormatted } : {}),
+        ...(reply.joinPageUrl ? { joinPageUrl: reply.joinPageUrl } : {}),
       };
     },
   };

@@ -52,6 +52,16 @@ export interface MintInviteInput {
 export interface MintInviteResult {
     inviteToken: string;
     url: string;
+    /**
+     * 6-digit numeric PIN paired with the URL token. Same expiresAt and
+     * maxUses budget. Pair it with `joinPageUrl` for out-of-band
+     * (phone / voice) handoff: "go to <joinPageUrl>, enter meeting id X,
+     * PIN Y-Y-Y-Y-Y-Y". Hub returns this field from v0.2 onward; older
+     * Hub builds omit it and clients should treat it as optional.
+     */
+    accessPin?: string;
+    /** Hub's landing-page URL (`<publicUrl>/join`). Pair with accessPin. */
+    joinPageUrl?: string;
     expiresAt: number;
 }
 export declare class HubBridgeClient extends EventEmitter {
