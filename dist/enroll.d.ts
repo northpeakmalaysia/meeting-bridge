@@ -14,8 +14,14 @@
 export interface EnrollInput {
     /** Hub URL — usually derived from config.url (wss://) → https://. */
     hubBaseUrl: string;
-    /** Shared bootstrap secret. */
-    bootstrapSecret: string;
+    /**
+     * Shared bootstrap secret. Omit to attempt open-enrollment — the Hub
+     * accepts the request only when its super-admin set
+     * `HUB_BOOTSTRAP_OPEN_ENROLLMENT=true`; otherwise it returns 401 with
+     * `code: 'enrollment_disabled'` and the caller surfaces a clear
+     * actionable error to the operator.
+     */
+    bootstrapSecret?: string;
     /** Installation UUID from <workspace>/.swarmai/installation-id. */
     installationId: string;
     /** Defaults to os.hostname() — overridable for testing. */

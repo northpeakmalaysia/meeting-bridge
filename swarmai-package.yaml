@@ -2,7 +2,12 @@
 # Cross-validated against the `@swarmai/meeting-bridge` manifest.yaml that
 # lives under packages/official/meeting-bridge/ in the SwarmAI Hub repo.
 id: '@swarmai/meeting-bridge'
-version: '0.3.0'
+version: '0.8.7'
+# v0.8.7 — TTS provider list gains `openai-realtime` (OpenAI Realtime API over
+# WebSocket, used as a TTS engine, sharing the openai-tts API key). ttsModel
+# enum extended with the Realtime model ids. (The published 0.8.6 tarball
+# predated this code, so the feature ships as 0.8.7 to avoid overwriting a
+# released version with different bytes.)
 kind: 'tool'
 entry: './dist/index.js'
 capabilities:
@@ -11,54 +16,139 @@ capabilities:
 
 # Surfaced to the dashboard's Hub pane so operators can fill in the
 # Meeting Hub WSS endpoint + auth via the Configure button instead of
-# hand-editing plugins.yaml. As of v0.2.0 only `url` is strictly required;
+# hand-editing plugins.yaml. As of v0.5.0 only `url` is strictly required;
 # authentication is satisfied by ANY of:
 #   - token (pre-issued, legacy explicit-provisioning path), OR
-#   - bootstrapSecret (zero-touch enrollment), OR
-#   - env var SWARMAI_HUB_BOOTSTRAP_SECRET (org-wide deploy path).
+#   - bootstrapSecret (bcrypt-gated zero-touch enrollment), OR
+#   - env var SWARMAI_HUB_BOOTSTRAP_SECRET (org-wide deploy path), OR
+#   - (v0.5.0) nothing — plugin attempts open-enrollment; succeeds only
+#     when the Hub has HUB_BOOTSTRAP_OPEN_ENROLLMENT=true. Otherwise the
+#     Hub returns 401 and the plugin surfaces an actionable error.
 configSchema:
+  type: object
   title: 'SwarmAI Meeting Hub'
   description: >-
-    Connect this CEO Agent to a SwarmAI Meeting Hub so external guests
-    can join meetings as human-external attendees in Athena's
-    MeetingRegistry.
-  required: [url]
+    Connect this CEO Agent to a SwarmAI Meeting Hub so external guests can
+    join meetings as human-external attendees, and configure the Hub-side
+    plugins (text-to-voice / voice-to-text) this tenant uses.
+  required: ['url']
   properties:
     url:
       type: string
-      title: 'Hub WebSocket URL'
-      description: 'The wss:// (or ws://) endpoint of your Meeting Hub.'
-      format: uri
-      examples: ['wss://meeting.northpeak.app/bridge']
+      title: 'Hub URL'
+      description: 'wss://meeting.example.com/bridge - provided by the Hub super-admin.'
     token:
       type: string
       title: 'Bridge token (optional)'
+      format: password
       description: >-
         Pre-issued bridge token from POST /admin/tenants. Skip when using
-        bootstrap-secret enrollment.
-      format: password
+        bootstrap-secret enrollment. If both are set, token wins.
     bootstrapSecret:
       type: string
       title: 'Bootstrap secret (optional)'
+      format: password
       description: >-
         Shared bootstrap secret for POST /bridge/enroll. On first start with
-        no stored token, plugin POSTs this + the installation UUID to the
-        Hub and receives an auto-issued tenant + token.
-      format: password
+        no stored token the plugin POSTs this + the installation UUID and
+        receives an auto-issued tenant + token. Leave blank to use env var
+        SWARMAI_HUB_BOOTSTRAP_SECRET instead.
     expectedTenantSlug:
       type: string
       title: 'Expected tenant slug (exact match)'
       description: >-
-        When set, the bridge refuses to connect if the Hub reports a
-        different tenant — guards against pairing with the wrong instance.
+        Optional defensive check - disconnect if the Hub welcomes us as a
+        different tenant. For auto-enrolled slugs, prefer the prefix below.
     expectedTenantSlugPrefix:
       type: string
       title: 'Expected tenant slug prefix'
       description: >-
-        For auto-enrolled tenants whose slug follows the `<hostname>-<short-id>`
-        pattern — set this to your org marker (e.g. "acmecorp-").
+        Optional defensive check for auto-enrolled tenants whose slug follows
+        the <hostname>-<short-id> pattern. Ignored when the exact slug is set.
     artefactSizeLimitMb:
       type: number
       title: 'Artefact size limit (MB)'
-      description: 'Max payload size for fetched artefacts.'
       default: 50
+    artefactChunkKb:
+      type: number
+      title: 'Upload chunk size (KB)'
+      default: 256
+    reconnectInitialMs:
+      type: number
+      title: 'Initial reconnect backoff (ms)'
+      default: 1000
+    reconnectMaxMs:
+      type: number
+      title: 'Max reconnect backoff (ms)'
+      default: 60000
+    ttsEnabled:
+      type: boolean
+      title: 'Enable text-to-voice (TTS)'
+      description: 'Turn on the Hub text-to-voice plugin for this tenant.'
+    ttsProvider:
+      type: string
+      title: 'TTS provider'
+      enum: ['openai-tts', 'openai-realtime', 'local-piper']
+      default: 'openai-tts'
+      description: >-
+        openai-tts = the /v1/audio/speech endpoint (cheapest, best for plain
+        narration). openai-realtime = the Realtime API over WebSocket, used as
+        a TTS engine with the SAME API key — richer voice but ~10-20x the cost;
+        pick it only when you want the Realtime voice. local-piper = offline,
+        no key.
+    ttsApiKey:
+      type: string
+      title: 'TTS API key'
+      format: password
+      description: 'API key for the TTS provider (e.g. OpenAI). Stored encrypted on the Hub.'
+    ttsVoice:
+      type: string
+      title: 'TTS voice'
+      description: 'alloy, echo, fable, onyx, nova, or shimmer.'
+      default: 'alloy'
+    ttsModel:
+      type: string
+      title: 'TTS model'
+      enum:
+        - 'gpt-4o-mini-tts'
+        - 'tts-1'
+        - 'tts-1-hd'
+        - 'gpt-realtime'
+        - 'gpt-4o-realtime-preview'
+        - 'gpt-4o-mini-realtime-preview'
+      description: 'For openai-tts: gpt-4o-mini-tts (best, supports the tone instructions below), tts-1, tts-1-hd. For openai-realtime: gpt-realtime (default), gpt-4o-realtime-preview, gpt-4o-mini-realtime-preview. Ignored by local-piper (uses the bundled voice).'
+      default: 'gpt-4o-mini-tts'
+    ttsInstructions:
+      type: string
+      title: 'TTS tone instructions'
+      description: 'Delivery style for OpenAI gpt-4o-mini-tts only (ignored by tts-1/tts-1-hd and local-piper). e.g. "Speak as a warm, confident meeting presenter with natural pacing."'
+      default: 'Speak as a warm, confident meeting presenter. Natural conversational pacing, light emphasis on key points. Do not spell out punctuation or symbols.'
+    ttsAutoNarrate:
+      type: boolean
+      title: 'Auto-narrate turns (speak every agent reply)'
+      description: 'When on, the Hub speaks each meeting turn aloud to participants. Off = only the agent speak tool produces voice.'
+    sttEnabled:
+      type: boolean
+      title: 'Enable voice-to-text (STT)'
+      description: 'Turn on the Hub voice-to-text plugin for this tenant.'
+    sttProvider:
+      type: string
+      title: 'STT provider'
+      enum: ['openai-whisper', 'local-whisper']
+      default: 'openai-whisper'
+    sttApiKey:
+      type: string
+      title: 'STT API key'
+      format: password
+      description: 'API key for the STT provider (e.g. OpenAI). Stored encrypted on the Hub.'
+    sttLanguage:
+      type: string
+      title: 'STT language'
+      description: 'auto, en, id, etc.'
+      default: 'auto'
+    sttModel:
+      type: string
+      title: 'STT model'
+      enum: ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe']
+      description: 'OpenAI transcription model. Ignored by local-whisper (uses the bundled model).'
+      default: 'whisper-1'

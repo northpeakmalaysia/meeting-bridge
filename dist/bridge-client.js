@@ -14,7 +14,7 @@
  * if they look "wrong" — the operator's `expectedTenantSlug` check
  * (when configured) compares to the welcome at warn-only severity.
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 export class HubBridgeClient extends EventEmitter {
@@ -28,6 +28,16 @@ export class HubBridgeClient extends EventEmitter {
     welcome = null;
     pending = new Map();
     pendingStream = new Map();
+    /**
+     * Client-side keepalive. Cloudflare (and most WSS proxies) close an
+     * idle WebSocket after ~100s of no frames in EITHER direction. A bridge
+     * that just sits "standing by" (agent minted a share link, waiting for a
+     * guest) would otherwise drop — and the Hub would report the agent as
+     * offline to guests until the next reconnect. Sending a ping frame every
+     * 30s keeps the connection (and the Hub's `bridgeLive` flag) alive.
+     */
+    heartbeatTimer = null;
+    heartbeatMs = 30_000;
     /** Last server event id we acknowledged seeing; sent on resume. */
     lastServerEventId = null;
     installationId;
@@ -37,6 +47,14 @@ export class HubBridgeClient extends EventEmitter {
      *  rotation). */
     resolvedToken = null;
     tokenSource;
+    /**
+     * `${meetingId}:${turnId}` → timestamp for narration clips the Hub has
+     * reported finished playing (`bridge.meeting.narration-complete`). Recorded
+     * unconditionally so `waitForNarration` resolves even when the signal
+     * arrives BEFORE the agent calls await (common — synth + playback can beat
+     * the agent's next tool call). Pruned past 5 min.
+     */
+    narrationDone = new Map();
     constructor(config, hostInfo, logger, 
     /**
      * Lazy token source. When omitted, falls back to `config.token`.
@@ -60,6 +78,55 @@ export class HubBridgeClient extends EventEmitter {
                     }
                     return config.token;
                 });
+        // Record narration-complete signals as they arrive (broadcast frames are
+        // re-emitted by `type`). This persists the completion so a later
+        // `waitForNarration` call still sees it — see the field comment.
+        this.on('bridge.meeting.narration-complete', (frame) => {
+            const f = frame;
+            if (f && typeof f.meetingId === 'string' && typeof f.turnId === 'string') {
+                const now = Date.now();
+                this.narrationDone.set(`${f.meetingId}:${f.turnId}`, now);
+                if (this.narrationDone.size > 500) {
+                    for (const [k, ts] of this.narrationDone) {
+                        if (now - ts > 300_000)
+                            this.narrationDone.delete(k);
+                    }
+                }
+            }
+        });
+    }
+    /**
+     * Wait until the Hub reports a turn's TTS narration has finished playing
+     * (or skipped, or no-audience). Lets `main` pace itself: post a turn → await
+     * its narration → dispatch the next agent, so several agents don't narrate
+     * over each other. Resolves immediately if the signal already arrived.
+     * Always resolves (never rejects/hangs): `{ completed: false, timedOut: true }`
+     * after `timeoutMs` so a lost signal can't stall the meeting.
+     */
+    async waitForNarration(meetingId, turnId, timeoutMs = 45_000) {
+        const key = `${meetingId}:${turnId}`;
+        if (this.narrationDone.has(key))
+            return { completed: true };
+        return new Promise((resolve) => {
+            let settled = false;
+            const onFrame = (frame) => {
+                const f = frame;
+                if (settled || !f || f.meetingId !== meetingId || f.turnId !== turnId)
+                    return;
+                settled = true;
+                clearTimeout(timer);
+                this.off('bridge.meeting.narration-complete', onFrame);
+                resolve({ completed: true });
+            };
+            const timer = setTimeout(() => {
+                if (settled)
+                    return;
+                settled = true;
+                this.off('bridge.meeting.narration-complete', onFrame);
+                resolve({ completed: false, timedOut: true });
+            }, timeoutMs);
+            this.on('bridge.meeting.narration-complete', onFrame);
+        });
     }
     /** Force the next connect to re-resolve the token. Used after a 4401 close. */
     invalidateToken() {
@@ -127,7 +194,29 @@ export class HubBridgeClient extends EventEmitter {
             /* swallow */
         }
     }
+    startHeartbeat() {
+        this.stopHeartbeat();
+        this.heartbeatTimer = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                try {
+                    this.ws.ping();
+                }
+                catch {
+                    /* close/error handlers own reconnect */
+                }
+            }
+        }, this.heartbeatMs);
+        // Don't keep the event loop alive just for the heartbeat.
+        this.heartbeatTimer.unref?.();
+    }
+    stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
     async stop() {
+        this.stopHeartbeat();
         if (this.ws) {
             this.ws.close(1000, 'shutdown');
             this.ws = null;
@@ -173,6 +262,16 @@ export class HubBridgeClient extends EventEmitter {
         if (input.maxUses !== undefined)
             frame['maxUses'] = input.maxUses;
         return this.request(frame, 'bridge.invite.minted');
+    }
+    /**
+     * Push per-tenant plugin configuration to the Hub (provider keys, models,
+     * voices, enable toggles). The Hub stores it encrypted under the tenant
+     * vault and applies it on the next plugin invocation — no restart. Single
+     * round-trip; resolves with the Hub's per-plugin {enabled, configured}
+     * verdict. Secrets are never echoed back in the ack.
+     */
+    async setPluginConfig(configs) {
+        return this.request({ type: 'bridge.plugin.config.set', configs }, 'bridge.plugin.config.ack');
     }
     /** Query the Hub-side meeting archive. Single round-trip. */
     async queryHistory(input) {
@@ -255,6 +354,80 @@ export class HubBridgeClient extends EventEmitter {
             }
         });
     }
+    /**
+     * Upload a file's bytes to the Hub (chunked). Used by the host to
+     * mirror agent/operator-shared `file://` / `data:` artefacts so guests
+     * can download them AND so a deck can be driven via `openPresentation`.
+     * Reuses the caller's `artefactId` (the Hub's upload-begin handler
+     * honours a client-supplied id), so a follow-on present.open addresses
+     * the same file with no id translation.
+     *
+     * Wire sequence: upload-begin (await upload-ready) → upload-chunk* →
+     * upload-end (await upload-acked). Bytes are sha256-checked Hub-side.
+     */
+    async uploadArtefact(input) {
+        await this.ensureConnected();
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            throw new Error('bridge not connected');
+        }
+        const sha256 = createHash('sha256').update(input.bytes).digest('hex');
+        const beginFrame = {
+            type: 'bridge.artefact.upload-begin',
+            meetingId: input.meetingId,
+            artefactId: input.artefactId,
+            mime: input.mime,
+            sizeBytes: input.bytes.byteLength,
+            sharedBy: input.sharedBy,
+            sha256,
+        };
+        if (input.label !== undefined)
+            beginFrame['label'] = input.label;
+        await this.request(beginFrame, 'bridge.artefact.upload-ready', 30_000);
+        // 256 KB binary chunks → ~341 KB base64, comfortably under the Hub's
+        // 2 MB per-chunk schema cap. Sent fire-and-forget in order; the WSS
+        // preserves frame order and the Hub validates seq + sha256 on end.
+        const CHUNK = 256 * 1024;
+        let seq = 0;
+        for (let off = 0; off < input.bytes.byteLength; off += CHUNK) {
+            const slice = input.bytes.subarray(off, Math.min(off + CHUNK, input.bytes.byteLength));
+            this.sendOneway({
+                type: 'bridge.artefact.upload-chunk',
+                meetingId: input.meetingId,
+                artefactId: input.artefactId,
+                seq,
+                dataB64: slice.toString('base64'),
+            });
+            seq++;
+            // Light backpressure so a large deck doesn't balloon the socket
+            // send buffer unbounded.
+            if (this.ws.bufferedAmount > 4 * 1024 * 1024) {
+                await new Promise((r) => setTimeout(r, 15));
+            }
+        }
+        await this.request({
+            type: 'bridge.artefact.upload-end',
+            meetingId: input.meetingId,
+            artefactId: input.artefactId,
+            totalChunks: seq,
+        }, 'bridge.artefact.upload-acked', 60_000);
+        return { ok: true, artefactId: input.artefactId };
+    }
+    /**
+     * Fire-and-forget composing/"typing" presence. The host calls this when
+     * the main agent starts/stops drafting a reply to a guest turn; the Hub
+     * fans it to guests as a transient "X is typing…" indicator.
+     */
+    publishTyping(input) {
+        const frame = {
+            type: 'bridge.meeting.typing',
+            meetingId: input.meetingId,
+            peerId: input.peerId,
+            state: input.state,
+        };
+        if (input.displayName !== undefined)
+            frame['displayName'] = input.displayName;
+        this.sendOneway(frame);
+    }
     // ---------------------------------------------------------------
     async connect() {
         if (!this.resolvedToken) {
@@ -290,6 +463,10 @@ export class HubBridgeClient extends EventEmitter {
                 }
                 ws.send(JSON.stringify(helloFrame));
                 helloed = true;
+                // Start the keepalive once the socket is open. Cleared in the
+                // 'close' handler + stop(). Ping failures are swallowed — the
+                // 'close'/'error' handlers own reconnect.
+                this.startHeartbeat();
             });
             ws.on('message', (raw) => {
                 let frame;
@@ -373,6 +550,7 @@ export class HubBridgeClient extends EventEmitter {
             ws.on('close', (code, reason) => {
                 const reasonStr = reason.toString('utf8');
                 this.logger.warn('bridge closed', { code, reason: reasonStr });
+                this.stopHeartbeat();
                 this.welcome = null;
                 this.ws = null;
                 // Hard-error close codes — never reconnect.

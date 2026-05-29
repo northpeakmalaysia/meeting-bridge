@@ -29,6 +29,22 @@ export interface FetchArtefactResult {
     mime: string;
     filename: string;
 }
+export interface PluginConfigEntry {
+    pluginId: string;
+    enabled?: boolean;
+    config?: Record<string, unknown>;
+}
+export interface PluginConfigAck {
+    applied: Array<{
+        pluginId: string;
+        enabled: boolean;
+        configured: boolean;
+    }>;
+    errors?: Array<{
+        pluginId: string;
+        error: string;
+    }>;
+}
 export interface HistoryQueryInput {
     meetingId?: string;
     attendeePeerId?: string;
@@ -75,6 +91,16 @@ export declare class HubBridgeClient extends EventEmitter {
     private welcome;
     private pending;
     private pendingStream;
+    /**
+     * Client-side keepalive. Cloudflare (and most WSS proxies) close an
+     * idle WebSocket after ~100s of no frames in EITHER direction. A bridge
+     * that just sits "standing by" (agent minted a share link, waiting for a
+     * guest) would otherwise drop — and the Hub would report the agent as
+     * offline to guests until the next reconnect. Sending a ping frame every
+     * 30s keeps the connection (and the Hub's `bridgeLive` flag) alive.
+     */
+    private heartbeatTimer;
+    private readonly heartbeatMs;
     /** Last server event id we acknowledged seeing; sent on resume. */
     private lastServerEventId;
     private installationId;
@@ -84,6 +110,14 @@ export declare class HubBridgeClient extends EventEmitter {
      *  rotation). */
     private resolvedToken;
     private readonly tokenSource;
+    /**
+     * `${meetingId}:${turnId}` → timestamp for narration clips the Hub has
+     * reported finished playing (`bridge.meeting.narration-complete`). Recorded
+     * unconditionally so `waitForNarration` resolves even when the signal
+     * arrives BEFORE the agent calls await (common — synth + playback can beat
+     * the agent's next tool call). Pruned past 5 min.
+     */
+    private narrationDone;
     constructor(config: ConfigSchemaT, hostInfo: {
         installationId: string;
         agentDisplayName: string;
@@ -103,6 +137,18 @@ export declare class HubBridgeClient extends EventEmitter {
      * Called once per connect; cached between connects.
      */
     tokenSource?: () => Promise<string>);
+    /**
+     * Wait until the Hub reports a turn's TTS narration has finished playing
+     * (or skipped, or no-audience). Lets `main` pace itself: post a turn → await
+     * its narration → dispatch the next agent, so several agents don't narrate
+     * over each other. Resolves immediately if the signal already arrived.
+     * Always resolves (never rejects/hangs): `{ completed: false, timedOut: true }`
+     * after `timeoutMs` so a lost signal can't stall the meeting.
+     */
+    waitForNarration(meetingId: string, turnId: string, timeoutMs?: number): Promise<{
+        completed: boolean;
+        timedOut?: boolean;
+    }>;
     /** Force the next connect to re-resolve the token. Used after a 4401 close. */
     invalidateToken(): void;
     /**
@@ -121,6 +167,8 @@ export declare class HubBridgeClient extends EventEmitter {
     sendOneway(frame: Record<string, unknown> & {
         type: string;
     }): void;
+    private startHeartbeat;
+    private stopHeartbeat;
     stop(): Promise<void>;
     /** True iff the WSS is open AND we've received the `bridge.welcome`. */
     get isConnected(): boolean;
@@ -128,6 +176,14 @@ export declare class HubBridgeClient extends EventEmitter {
     onWelcome(cb: (welcome: WelcomePayload) => void): () => void;
     /** Mint a share-link invite. Single round-trip. */
     mintInvite(input: MintInviteInput): Promise<MintInviteResult>;
+    /**
+     * Push per-tenant plugin configuration to the Hub (provider keys, models,
+     * voices, enable toggles). The Hub stores it encrypted under the tenant
+     * vault and applies it on the next plugin invocation — no restart. Single
+     * round-trip; resolves with the Hub's per-plugin {enabled, configured}
+     * verdict. Secrets are never echoed back in the ack.
+     */
+    setPluginConfig(configs: PluginConfigEntry[]): Promise<PluginConfigAck>;
     /** Query the Hub-side meeting archive. Single round-trip. */
     queryHistory(input: HistoryQueryInput): Promise<{
         total: number;
@@ -143,6 +199,39 @@ export declare class HubBridgeClient extends EventEmitter {
      * at the application layer rather than relying on a longer ceiling.
      */
     fetchArtefact(meetingId: string, artefactId: string): Promise<FetchArtefactResult>;
+    /**
+     * Upload a file's bytes to the Hub (chunked). Used by the host to
+     * mirror agent/operator-shared `file://` / `data:` artefacts so guests
+     * can download them AND so a deck can be driven via `openPresentation`.
+     * Reuses the caller's `artefactId` (the Hub's upload-begin handler
+     * honours a client-supplied id), so a follow-on present.open addresses
+     * the same file with no id translation.
+     *
+     * Wire sequence: upload-begin (await upload-ready) → upload-chunk* →
+     * upload-end (await upload-acked). Bytes are sha256-checked Hub-side.
+     */
+    uploadArtefact(input: {
+        meetingId: string;
+        artefactId: string;
+        bytes: Buffer;
+        mime: string;
+        label?: string;
+        sharedBy: string;
+    }): Promise<{
+        ok: true;
+        artefactId: string;
+    }>;
+    /**
+     * Fire-and-forget composing/"typing" presence. The host calls this when
+     * the main agent starts/stops drafting a reply to a guest turn; the Hub
+     * fans it to guests as a transient "X is typing…" indicator.
+     */
+    publishTyping(input: {
+        meetingId: string;
+        peerId: string;
+        displayName?: string;
+        state: 'start' | 'stop';
+    }): void;
     private connect;
 }
 //# sourceMappingURL=bridge-client.d.ts.map

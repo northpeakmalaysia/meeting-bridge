@@ -37,13 +37,23 @@ export function bridgeUrlToEnrollUrl(bridgeUrl) {
 }
 export async function enrollWithHub(input) {
     const url = bridgeUrlToEnrollUrl(input.hubBaseUrl);
-    const body = JSON.stringify({
-        bootstrapSecret: input.bootstrapSecret,
+    // Omit bootstrapSecret entirely when absent — the Hub's zod schema
+    // treats it as `.optional()` and uses the missing field to detect the
+    // open-enrollment path. Sending `bootstrapSecret: undefined` would be
+    // dropped by JSON.stringify anyway, but being explicit keeps the
+    // request body shape unambiguous for anyone inspecting it on the wire.
+    const payload = {
         installationId: input.installationId,
         hostname: input.hostname ?? safeHostname(),
         firstSeen: Date.now(),
-        ...(input.preferredSlug ? { preferredSlug: input.preferredSlug } : {}),
-    });
+    };
+    if (input.bootstrapSecret !== undefined) {
+        payload['bootstrapSecret'] = input.bootstrapSecret;
+    }
+    if (input.preferredSlug) {
+        payload['preferredSlug'] = input.preferredSlug;
+    }
+    const body = JSON.stringify(payload);
     const { status, json } = await postJson(url, body);
     if (status === 200 || status === 201) {
         if (typeof json !== 'object' ||

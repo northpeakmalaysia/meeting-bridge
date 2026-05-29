@@ -20,8 +20,14 @@ import { URL } from 'node:url';
 export interface EnrollInput {
   /** Hub URL — usually derived from config.url (wss://) → https://. */
   hubBaseUrl: string;
-  /** Shared bootstrap secret. */
-  bootstrapSecret: string;
+  /**
+   * Shared bootstrap secret. Omit to attempt open-enrollment — the Hub
+   * accepts the request only when its super-admin set
+   * `HUB_BOOTSTRAP_OPEN_ENROLLMENT=true`; otherwise it returns 401 with
+   * `code: 'enrollment_disabled'` and the caller surfaces a clear
+   * actionable error to the operator.
+   */
+  bootstrapSecret?: string;
   /** Installation UUID from <workspace>/.swarmai/installation-id. */
   installationId: string;
   /** Defaults to os.hostname() — overridable for testing. */
@@ -64,13 +70,23 @@ export function bridgeUrlToEnrollUrl(bridgeUrl: string): string {
 
 export async function enrollWithHub(input: EnrollInput): Promise<EnrollResult> {
   const url = bridgeUrlToEnrollUrl(input.hubBaseUrl);
-  const body = JSON.stringify({
-    bootstrapSecret: input.bootstrapSecret,
+  // Omit bootstrapSecret entirely when absent — the Hub's zod schema
+  // treats it as `.optional()` and uses the missing field to detect the
+  // open-enrollment path. Sending `bootstrapSecret: undefined` would be
+  // dropped by JSON.stringify anyway, but being explicit keeps the
+  // request body shape unambiguous for anyone inspecting it on the wire.
+  const payload: Record<string, unknown> = {
     installationId: input.installationId,
     hostname: input.hostname ?? safeHostname(),
     firstSeen: Date.now(),
-    ...(input.preferredSlug ? { preferredSlug: input.preferredSlug } : {}),
-  });
+  };
+  if (input.bootstrapSecret !== undefined) {
+    payload['bootstrapSecret'] = input.bootstrapSecret;
+  }
+  if (input.preferredSlug) {
+    payload['preferredSlug'] = input.preferredSlug;
+  }
+  const body = JSON.stringify(payload);
 
   const { status, json } = await postJson(url, body);
   if (status === 200 || status === 201) {
